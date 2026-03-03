@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Monitor + Relé</title>
+  <link rel="stylesheet" href="/esti.css">
+  <script src="plotly-3.1.0.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h1>🌡️ Live Temperature Monitor + Relé</h1>
+
+    <div class="status" id="status">Conectando...</div>
+
+    <div class="switch-container">
+      <span class="relay-status" id="relayLabel">Relé: --</span>
+      <label class="switch">
+        <input type="checkbox" id="relaySwitch">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div id="plot"></div>
+
+    <div class="controls">
+      <button class="primary" id="toggleBtn" onclick="toggleMonitoring()">Pause</button>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = 'http://192.168.4.1';
+    const DADOS_URL = API_BASE + '/dados';
+    const RELAY_ON = API_BASE + '/relay/on';
+    const RELAY_OFF = API_BASE + '/relay/off';
+    const RELAY_STATUS = API_BASE + '/relay/status';
+
+    const relaySwitch = document.getElementById('relaySwitch');
+    const relayLabel = document.getElementById('relayLabel');
+
+    // Funções de controle do relé
+    async function setRelay(state) {
+      try {
+        const url = state ? RELAY_ON : RELAY_OFF;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('Erro na rede');
+        await res.json();
+        updateRelayStateDisplay();
+      } catch (e) {
+        console.error(e);
+        alert('Falha ao acessar o relé');
+        // Reverte o switch em caso de erro
+        relaySwitch.checked = !state;
+      }
+    }
+
+    async function updateRelayStateDisplay() {
+      try {
+        const res = await fetch(RELAY_STATUS);
+        if (!res.ok) throw new Error('Erro');
+        const j = await res.json();
+        const isOn = j.relay === 'ON' || j.relay === 'on';
+        relaySwitch.checked = isOn;
+        relayLabel.textContent = 'Relé: ' + (isOn ? 'LIGADO' : 'DESLIGADO');
+        relayLabel.className = 'relay-status ' + (isOn ? 'on' : 'off');
+      } catch (e) {
+        relayLabel.textContent = 'Relé: erro';
+        relayLabel.className = 'relay-status';
+      }
+    }
+
+    relaySwitch.addEventListener('change', (e) => {
+      setRelay(e.target.checked);
+    });
+
+    // --- Plot de temperatura ---
+    const UPDATE_INTERVAL = 1000;
+    const MAX_POINTS = 50;
+
+    let isMonitoring = true;
+    let intervalId = null;
+    let data = {};
+    let timeData = [];
+    let colors = ['#667eea', '#f59e0b', '#10b981', '#ef4444'];
+
+    function initPlot() {
+      const layout = {
+        title: '',
+        xaxis: { title: 'Time', showgrid: true, gridcolor: '#e5e7eb' },
+        yaxis: { title: 'Temperature (°C)', showgrid: true, gridcolor: '#e5e7eb' },
+        margin: { t: 30, r: 20, b: 50, l: 60 },
+        plot_bgcolor: '#f9fafb',
+        paper_bgcolor: 'white',
+        showlegend: true
+      };
+      Plotly.newPlot('plot', [], layout, {responsive: true});
+    }
+
+    async function fetchTemperatures() {
+      try {
+        const response = await fetch(DADOS_URL);
+        if (!response.ok) throw new Error('Network error');
+        const sensors = await response.json();
+        const now = new Date();
+        timeData.push(now);
+        if (timeData.length > MAX_POINTS) timeData.shift();
+
+        sensors.forEach((sensor, index) => {
+          const addr = sensor.endereco;
+          const shortAddr = addr.slice(-8);
+          if (!data[addr]) {
+            data[addr] = { temps: [], name: shortAddr, color: colors[index % colors.length] };
+          }
+          if (sensor.temperatura > -50) {
+            data[addr].temps.push(sensor.temperatura); 
+          }
+          if (data[addr].temps.length > MAX_POINTS) data[addr].temps.shift();
+        });
+
+        updatePlot();
+        updateStatus('connected', `Last update: ${now.toLocaleTimeString()}`);
+      } catch (error) {
+        console.error('Error fetching data:', error);
+        updateStatus('error', 'Connection error - retrying...');
+      }
+      updateRelayStateDisplay();
+    }
+
+    function updatePlot() {
+      const traces = Object.keys(data).map(addr => {
+        const alignedTemps = data[addr].temps.slice(-timeData.length);
+        return {
+          x: timeData.slice(-alignedTemps.length),
+          y: alignedTemps,
+          type: 'scatter',
+          mode: 'lines+markers',
+          name: data[addr].name,
+          line: { color: data[addr].color, width: 2 },
+          marker: { size: 6, color: data[addr].color }
+        };
+      });
+      Plotly.react('plot', traces, {
+        xaxis: { title: 'Time', type: 'date' },
+        yaxis: { title: 'Temperature (°C)' }
+      });
+    }
+
+    function updateStatus(type, message) {
+      const statusEl = document.getElementById('status');
+      statusEl.className = `status ${type}`;
+      statusEl.textContent = message;
+    }
+
+    function toggleMonitoring() {
+      isMonitoring = !isMonitoring;
+      const btn = document.getElementById('toggleBtn');
+      if (isMonitoring) {
+        btn.textContent = 'Pause';
+        startMonitoring();
+        updateStatus('connected', 'Monitoring resumed');
+      } else {
+        btn.textContent = 'Resume';
+        stopMonitoring();
+        updateStatus('', 'Monitoring paused');
+      }
+    }
+
+    function startMonitoring() {
+      if (intervalId) return;
+      fetchTemperatures();
+      intervalId = setInterval(fetchTemperatures, UPDATE_INTERVAL);
+    }
+
+    function stopMonitoring() {
+      if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+    }
+
+    // Inicialização
+    initPlot();
+    startMonitoring();
+    updateRelayStateDisplay();
+
+    window.addEventListener('beforeunload', stopMonitoring);
+  </script>
+</body>
+  <footer class="footer">
+    <h2>Equipe do Projeto</h2>
+    <div class="team-grid">
+      <div class="member-card">
+        <div class="member-icon">👨‍💻</div>
+        <h3>Gabriel Machado</h3>
+        <p class="member-role">Aluno</p>
+      </div>
+      <div class="member-card">
+        <div class="member-icon">💡</div>
+        <h3>Eduardo Gritt</h3>
+        <p class="member-role">Aluno</p>
+      </div>
+      <div class="member-card">
+        <div class="member-icon">🛠️</div>
+        <h3>Augusto Lima</h3>
+        <p class="member-role">Aluno</p>
+      </div>
+      <div class="member-card">
+        <div class="member-icon">🔧</div>
+        <h3>Fernando Jesus</h3>
+        <p class="member-role">Aluno</p>
+      </div>
+      <div class="member-card professor">
+        <div class="member-icon">🎓</div>
+        <h3>Caio Hamamura</h3>
+        <p class="member-role">Professor orientador</p>
+      </div>
+    </div>
+  </footer>
+</html>
